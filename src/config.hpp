@@ -13,7 +13,7 @@ struct Binding {
 
 namespace config {
 
-// Default config path: ~/.config/hotkeyd/bindings.conf
+// Default config path: /etc/hotkeyd/bindings.conf
 std::string defaultPath();
 
 // Load bindings from file. Returns empty vector if file doesn't exist.

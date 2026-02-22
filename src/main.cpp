@@ -37,7 +37,7 @@ static void usage(const char* argv0) {
         "                              or detects all keyboards.\n"
         "  -n <name>     Binding label/name\n"
         "  -c <command>  Shell command to execute\n"
-        "  -f <file>     Config file (default: ~/.config/hotkeyd/bindings.conf)\n"
+        "  -f <file>     Config file (default: /etc/hotkeyd/bindings.conf)\n"
         "\n"
         "Examples:\n"
         "  %s --detect\n"

@@ -3,22 +3,13 @@
 
 #include <fstream>
 #include <sstream>
-#include <cstdlib>
 #include <sys/stat.h>
 #include <algorithm>
 
 namespace config {
 
 std::string defaultPath() {
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    std::string base;
-    if (xdg && xdg[0]) {
-        base = xdg;
-    } else {
-        const char* home = std::getenv("HOME");
-        base = home ? std::string(home) + "/.config" : "/tmp";
-    }
-    return base + "/hotkeyd/bindings.conf";
+    return "/etc/hotkeyd/bindings.conf";
 }
 
 // Config format (one binding per line):
