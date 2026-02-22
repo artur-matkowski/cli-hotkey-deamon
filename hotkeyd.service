@@ -1,0 +1,19 @@
+[Unit]
+Description=Hotkey Daemon (hotkeyd)
+After=local-fs.target systemd-logind.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hotkeyd --daemon
+Restart=on-failure
+RestartSec=3
+
+# Security hardening
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
