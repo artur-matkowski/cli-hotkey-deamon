@@ -489,9 +489,10 @@ std::string resolvePathByName(const std::string& name) {
     return "";
 }
 
-int openDevice(const std::string& path) {
-    int fd = open(path.c_str(), O_RDONLY);
-    return fd;
+int openDevice(const std::string& path, bool nonBlocking) {
+    int flags = O_RDONLY;
+    if (nonBlocking) flags |= O_NONBLOCK;
+    return open(path.c_str(), flags);
 }
 
 bool grabDevice(int fd) {

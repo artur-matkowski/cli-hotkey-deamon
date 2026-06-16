@@ -25,7 +25,9 @@ std::string getDeviceName(const std::string& path);
 std::string resolvePathByName(const std::string& name);
 
 // Open a device for reading. Returns fd or -1 on error.
-int openDevice(const std::string& path);
+// When nonBlocking is true, reads return immediately (EAGAIN) when no event is
+// queued — used by the daemon to drain all pending events per poll wakeup.
+int openDevice(const std::string& path, bool nonBlocking = false);
 
 // Grab exclusive access (other programs won't see the keys while grabbed)
 bool grabDevice(int fd);

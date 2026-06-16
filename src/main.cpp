@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <set>
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <linux/input.h>
 #include <poll.h>
 
@@ -238,6 +240,27 @@ static int cmdRemove(const std::string& name, const std::string& cfgPath) {
 // ----------------------------------------------------------------
 // --daemon: listen for hotkeys and execute commands
 // ----------------------------------------------------------------
+
+// Format a timeval as "HH:MM:SS.mmm" in local time. Used for the debug log,
+// fed by ev.time (the kernel's event timestamp) so gaps between presses are
+// visible.
+static std::string tstamp(const struct timeval& tv) {
+    struct tm tm;
+    localtime_r(&tv.tv_sec, &tm);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03ld",
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             static_cast<long>(tv.tv_usec / 1000));
+    return buf;
+}
+
+// Same format, from the current wall-clock time (for events with no ev.time).
+static std::string tstampNow() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return tstamp(tv);
+}
+
 static volatile sig_atomic_t g_running = 1;
 
 static void sigHandler(int) {
@@ -260,6 +283,11 @@ static void executeCommand(const std::string& cmd) {
 }
 
 static int cmdDaemon(const std::string& device, const std::string& cfgPath) {
+    // Under systemd, stdout is a pipe to journald and thus fully buffered;
+    // line-buffer it so startup/diagnostic output reaches the journal promptly.
+    // (stderr, where the debug log goes, is unbuffered by default.)
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     auto bindings = config::load(cfgPath);
     if (bindings.empty()) {
         fprintf(stderr, "No bindings configured. Use --record first.\n");
@@ -327,7 +355,9 @@ static int cmdDaemon(const std::string& device, const std::string& cfgPath) {
     std::map<int, std::string> fdToName;
 
     for (auto& [devName, path] : nameToPath) {
-        int fd = evdev::openDevice(path);
+        // Non-blocking so the event loop can drain all queued events per poll
+        // wakeup (read returns EAGAIN once the kernel buffer is empty).
+        int fd = evdev::openDevice(path, /*nonBlocking=*/true);
         if (fd < 0) {
             fprintf(stderr, "Warning: cannot open %s (%s) (skipping)\n",
                     path.c_str(), devName.c_str());
@@ -371,6 +401,14 @@ static int cmdDaemon(const std::string& device, const std::string& cfgPath) {
     // while keys are held down). Reset when the combo is released.
     std::map<std::string, bool> fired;
 
+    // Key codes used by any binding. We log press/release only for these
+    // (plus triggers) so the debug log helps diagnose lost presses without
+    // recording every keystroke the user types.
+    std::set<int> boundCodes;
+    for (auto& b : bindings) {
+        boundCodes.insert(b.keyCodes.begin(), b.keyCodes.end());
+    }
+
     // Build pollfd array
     std::vector<struct pollfd> pfds;
     for (auto& [path, fd] : pathToFd) {
@@ -388,37 +426,63 @@ static int cmdDaemon(const std::string& device, const std::string& cfgPath) {
         for (auto& pfd : pfds) {
             if (!(pfd.revents & POLLIN)) continue;
 
-            struct input_event ev;
-            if (!evdev::readEvent(pfd.fd, ev)) continue;
-            if (ev.type != EV_KEY) continue;
-
             const std::string& devName = fdToName[pfd.fd];
 
-            if (ev.value == 1) {        // press
-                held[devName].insert(ev.code);
-            } else if (ev.value == 0) { // release
-                held[devName].erase(ev.code);
-            } else {
-                continue;  // repeat — ignore
-            }
+            // Drain ALL events queued on this fd. readEvent returns false on
+            // EAGAIN (non-blocking fd, buffer empty), ending the drain. Reading
+            // only one event per poll wakeup was the likely cause of lost presses
+            // under input bursts.
+            struct input_event ev;
+            while (evdev::readEvent(pfd.fd, ev)) {
+                // SYN_DROPPED means the kernel's per-client input buffer
+                // overflowed and events were discarded — direct evidence of
+                // lost presses. Log it loudly.
+                if (ev.type == EV_SYN && ev.code == SYN_DROPPED) {
+                    fprintf(stderr,
+                            "[%s] WARNING: SYN_DROPPED on %s — kernel input buffer "
+                            "overflow, events were dropped!\n",
+                            tstampNow().c_str(), devName.c_str());
+                    continue;
+                }
+                if (ev.type != EV_KEY) continue;
 
-            // Check bindings that belong to this device
-            for (auto& b : bindings) {
-                // Match binding to device: if binding has a device name set, it must
-                // match the event's device name. If binding has no device (legacy),
-                // match against any device.
-                if (!b.device.empty() && b.device != devName) continue;
+                if (ev.value == 1) {        // press
+                    held[devName].insert(ev.code);
+                } else if (ev.value == 0) { // release
+                    held[devName].erase(ev.code);
+                } else {
+                    continue;  // repeat — ignore
+                }
 
-                const auto& devHeld = held[devName];
-                bool match = std::includes(devHeld.begin(), devHeld.end(),
-                                            b.keyCodes.begin(), b.keyCodes.end());
-                if (match && !fired[b.name]) {
-                    printf("[trigger] %s (%s) -> %s\n",
-                           b.name.c_str(), devName.c_str(), b.command.c_str());
-                    executeCommand(b.command);
-                    fired[b.name] = true;
-                } else if (!match && fired[b.name]) {
-                    fired[b.name] = false;
+                // Log presses/releases of keys that participate in a binding.
+                if (boundCodes.count(ev.code)) {
+                    fprintf(stderr, "[%s] %-24s %-18s %-7s held={%s}\n",
+                            tstamp(ev.time).c_str(),
+                            devName.c_str(),
+                            evdev::keyName(ev.code).c_str(),
+                            ev.value == 1 ? "press" : "release",
+                            config::keysToString(held[devName]).c_str());
+                }
+
+                // Check bindings that belong to this device
+                for (auto& b : bindings) {
+                    // Match binding to device: if binding has a device name set, it must
+                    // match the event's device name. If binding has no device (legacy),
+                    // match against any device.
+                    if (!b.device.empty() && b.device != devName) continue;
+
+                    const auto& devHeld = held[devName];
+                    bool match = std::includes(devHeld.begin(), devHeld.end(),
+                                                b.keyCodes.begin(), b.keyCodes.end());
+                    if (match && !fired[b.name]) {
+                        fprintf(stderr, "[%s] TRIGGER %s (%s) -> %s\n",
+                                tstampNow().c_str(),
+                                b.name.c_str(), devName.c_str(), b.command.c_str());
+                        executeCommand(b.command);
+                        fired[b.name] = true;
+                    } else if (!match && fired[b.name]) {
+                        fired[b.name] = false;
+                    }
                 }
             }
         }
