@@ -232,7 +232,11 @@ static int cmdRemove(const std::string& name, const std::string& cfgPath) {
         return 1;
     }
 
-    config::save(cfgPath, bindings);
+    if (!config::save(cfgPath, bindings)) {
+        fprintf(stderr, "Error: failed to write config file %s\n"
+                        "Hint: try running with sudo.\n", cfgPath.c_str());
+        return 1;
+    }
     printf("Removed binding '%s'.\n", name.c_str());
     return 0;
 }
